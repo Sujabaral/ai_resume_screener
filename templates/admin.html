@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>MIDAS Analytics Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="dashboard">
+
+    <div class="topbar">
+        <div>
+            <h1>MIDAS Analytics Dashboard</h1>
+            <p>Hiring screening overview</p>
+        </div>
+
+        <div class="top-actions">
+            <a href="/" class="btn dark">Screen CVs</a>
+            <a href="/logout" class="btn danger">Logout</a>
+        </div>
+    </div>
+
+    <div class="analytics-grid">
+        <div class="analytics-card">
+            <span>Total Jobs</span>
+            <strong>{{ total_jobs }}</strong>
+        </div>
+
+        <div class="analytics-card">
+            <span>Total Candidates</span>
+            <strong>{{ total_candidates }}</strong>
+        </div>
+
+        <div class="analytics-card">
+            <span>Average Match</span>
+            <strong>{{ avg_score }}%</strong>
+        </div>
+
+        <div class="analytics-card">
+            <span>Emails Sent</span>
+            <strong>{{ emails_sent }}</strong>
+        </div>
+    </div>
+
+    <div class="analytics-grid three">
+        <div class="analytics-card">
+            <span>High Match</span>
+            <strong class="score-high">{{ high_matches }}</strong>
+        </div>
+
+        <div class="analytics-card">
+            <span>Medium Match</span>
+            <strong class="score-mid">{{ medium_matches }}</strong>
+        </div>
+
+        <div class="analytics-card">
+            <span>Low Match</span>
+            <strong class="score-low">{{ low_matches }}</strong>
+        </div>
+    </div>
+
+    <div class="analytics-section">
+        <h2>Recent Candidates</h2>
+
+        <table class="ats-table">
+            <thead>
+                <tr>
+                    <th>Candidate</th>
+                    <th>Score</th>
+                    <th>Email</th>
+                    <th>Decision</th>
+                    <th>Created</th>
+                </tr>
+            </thead>
+
+            <tbody>
+                {% for candidate in recent_candidates %}
+                <tr>
+                    <td>
+                        <strong>{{ candidate.name }}</strong>
+                        <p>{{ candidate.email }}</p>
+                    </td>
+
+                    <td>
+                        {% if candidate.overall_score < 50 %}
+                            <strong class="score-low">{{ candidate.overall_score }}%</strong>
+                        {% elif candidate.overall_score < 75 %}
+                            <strong class="score-mid">{{ candidate.overall_score }}%</strong>
+                        {% else %}
+                            <strong class="score-high">{{ candidate.overall_score }}%</strong>
+                        {% endif %}
+                    </td>
+
+                    <td>
+                        {% if candidate.email_sent %}
+                            <span class="status-pill sent">Sent</span>
+                        {% else %}
+                            <span class="status-pill pending">Pending</span>
+                        {% endif %}
+                    </td>
+
+                    <td>{{ candidate.hr_decision }}</td>
+                    <td>{{ candidate.created_at }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+</div>
+
+</body>
+</html>

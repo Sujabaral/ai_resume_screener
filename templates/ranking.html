@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>MIDAS Candidate Ranking</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='ranking.css') }}">
+</head>
+<body>
+
+<div class="dashboard">
+
+    <div class="topbar">
+        <div>
+            <h1>MIDAS Candidate Ranking</h1>
+            <p>Position: <strong>{{ job.title }}</strong></p>
+            <p>Required Experience: <strong>{{ job.required_years }} years</strong></p>
+        </div>
+
+        <div class="top-actions">
+            <a href="/job/{{ job.id }}/download-excel" class="btn primary">Download Excel</a>
+            <a href="/admin" class="btn dark">Analytics</a>
+            <a href="/" class="btn dark">Screen New CVs</a>
+            <a href="/logout" class="btn danger">Logout</a>
+        </div>
+    </div>
+
+    <div class="warning-box">
+        <strong>Note:</strong> This system only supports HR review.
+    </div>
+
+    <div class="summary-strip">
+        <div>
+            <span>Total Candidates</span>
+            <strong id="totalCount">{{ candidates|length }}</strong>
+        </div>
+        <div>
+            <span>Visible</span>
+            <strong id="visibleCount">{{ candidates|length }}</strong>
+        </div>
+        <div>
+            <span>High Match</span>
+            <strong>{{ candidates|selectattr("overall_score", "ge", 75)|list|length }}</strong>
+        </div>
+        <div>
+            <span>Email Sent</span>
+            <strong>{{ candidates|selectattr("email_sent")|list|length }}</strong>
+        </div>
+    </div>
+
+    <div class="filter-panel">
+        <input type="text" id="searchInput" placeholder="Search name, email, skills...">
+
+        <select id="matchFilter">
+            <option value="all">All Match Levels</option>
+            <option value="high">High Match 75%+</option>
+            <option value="medium">Medium Match 50–74%</option>
+            <option value="low">Low Match below 50%</option>
+        </select>
+
+        <select id="emailFilter">
+            <option value="all">All Email Status</option>
+            <option value="sent">Email Sent</option>
+            <option value="pending">Email Pending</option>
+        </select>
+
+        <input type="number" id="minExp" placeholder="Min exp years">
+        <input type="number" id="minScore" placeholder="Min score %">
+
+        <button class="btn dark" onclick="resetFilters()">Reset</button>
+    </div>
+
+    <div class="ats-table-card">
+        <table class="ats-table" id="candidateTable">
+            <thead>
+                <tr>
+                    <th onclick="sortTable(0, 'number')">Rank</th>
+                    <th onclick="sortTable(1, 'text')">Candidate</th>
+                    <th onclick="sortTable(2, 'number')">Match</th>
+                    <th onclick="sortTable(3, 'number')">Skills</th>
+                    <th onclick="sortTable(4, 'number')">Experience</th>
+                    <th>AI Analysis</th>
+                    <th>Email</th>
+                    <th>Resume</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+
+            <tbody id="candidateBody">
+                {% for candidate in candidates %}
+
+                    {% if candidate.overall_score < 50 %}
+                        {% set match_level = "low" %}
+                    {% elif candidate.overall_score < 75 %}
+                        {% set match_level = "medium" %}
+                    {% else %}
+                        {% set match_level = "high" %}
+                    {% endif %}
+
+                    <tr class="candidate-row"
+                        data-match="{{ match_level }}"
+                        data-email="{% if candidate.email_sent or candidate.email_locked %}sent{% else %}pending{% endif %}"
+                        data-score="{{ candidate.overall_score }}"
+                        data-exp="{{ candidate.candidate_years }}"
+                        data-search="{{ candidate.name }} {{ candidate.email }} {{ candidate.phone }} {{ candidate.skills_present }} {{ candidate.skills_missing }} {{ candidate.preferred_skills_present }} {{ candidate.ai_analysis }}">
+
+                        <td class="rank-cell" data-value="{{ loop.index }}">#{{ loop.index }}</td>
+
+                        <td>
+                            <strong>{{ candidate.name }}</strong>
+                            <p>{{ candidate.email }}</p>
+                            <p>{{ candidate.phone }}</p>
+                            <small>{{ candidate.file_name }}</small>
+                        </td>
+
+                        <td data-value="{{ candidate.overall_score }}">
+                            {% if candidate.overall_score < 50 %}
+                                <strong class="score-low score-text">{{ candidate.overall_score }}%</strong>
+                            {% elif candidate.overall_score < 75 %}
+                                <strong class="score-mid score-text">{{ candidate.overall_score }}%</strong>
+                            {% else %}
+                                <strong class="score-high score-text">{{ candidate.overall_score }}%</strong>
+                            {% endif %}
+                            <p>{{ candidate.review_label }}</p>
+                        </td>
+
+                        <td data-value="{{ candidate.required_skill_score }}">
+                            <strong>{{ candidate.required_skill_score }}%</strong>
+                            <p><strong>Present:</strong> {{ candidate.skills_present }}</p>
+                            <p><strong>Missing:</strong> {{ candidate.skills_missing }}</p>
+                        </td>
+
+                        <td data-value="{{ candidate.candidate_years }}">
+                            <strong>{{ candidate.candidate_years }} / {{ candidate.required_years }} yrs</strong>
+                            <p>Score: {{ candidate.experience_score }}%</p>
+                        </td>
+
+                        <td>
+                            <details>
+                                <summary>Analysis</summary>
+                                <div class="analysis-preview">
+                                    <p>{{ candidate.ai_analysis }}</p>
+                                </div>
+                            </details>
+                        </td>
+
+                        <td>
+                            {% if candidate.email_sent or candidate.email_locked %}
+                                <span class="status-pill sent">Sent</span>
+                            {% else %}
+                                <span class="status-pill pending">Pending</span>
+                            {% endif %}
+                        </td>
+
+                        <td>
+                            <a href="/uploads/{{ candidate.file_name }}" target="_blank" class="btn small light">Preview</a>
+                        </td>
+
+                        <td>
+                            <a href="/candidate/{{ candidate.id }}" class="btn small dark">View</a>
+
+                            {% if candidate.email_sent or candidate.email_locked %}
+                                <button class="btn small disabled" disabled>Email Sent</button>
+                            {% else %}
+                                <form method="POST" action="/send-email/{{ candidate.id }}" class="table-action-form">
+                                    <button type="submit" name="email_type" value="accepted" class="btn small success">
+                                        Accept
+                                    </button>
+                                    <button type="submit" name="email_type" value="rejected" class="btn small danger">
+                                        Reject
+                                    </button>
+                                </form>
+                            {% endif %}
+                        </td>
+                    </tr>
+
+                {% else %}
+                    <tr>
+                        <td colspan="9">No candidates found.</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="pagination-bar">
+        <button class="btn dark" onclick="prevPage()">Previous</button>
+        <span id="pageInfo"></span>
+        <button class="btn dark" onclick="nextPage()">Next</button>
+
+        <select id="rowsPerPage" onchange="changeRowsPerPage()">
+            <option value="10">10 per page</option>
+            <option value="25">25 per page</option>
+            <option value="50">50 per page</option>
+            <option value="100">100 per page</option>
+        </select>
+    </div>
+
+</div>
+
+<script>
+let currentPage = 1;
+let rowsPerPage = 10;
+let filteredRows = [];
+let sortDirection = {};
+
+const rows = Array.from(document.querySelectorAll(".candidate-row"));
+const searchInput = document.getElementById("searchInput");
+const matchFilter = document.getElementById("matchFilter");
+const emailFilter = document.getElementById("emailFilter");
+const minExp = document.getElementById("minExp");
+const minScore = document.getElementById("minScore");
+const visibleCount = document.getElementById("visibleCount");
+const pageInfo = document.getElementById("pageInfo");
+
+function applyFilters() {
+    const search = searchInput.value.toLowerCase();
+    const match = matchFilter.value;
+    const email = emailFilter.value;
+    const expValue = parseFloat(minExp.value || 0);
+    const scoreValue = parseFloat(minScore.value || 0);
+
+    filteredRows = rows.filter(row => {
+        const rowText = row.dataset.search.toLowerCase();
+        const rowMatch = row.dataset.match;
+        const rowEmail = row.dataset.email;
+        const rowExp = parseFloat(row.dataset.exp || 0);
+        const rowScore = parseFloat(row.dataset.score || 0);
+
+        return (
+            rowText.includes(search) &&
+            (match === "all" || rowMatch === match) &&
+            (email === "all" || rowEmail === email) &&
+            rowExp >= expValue &&
+            rowScore >= scoreValue
+        );
+    });
+
+    currentPage = 1;
+    renderTable();
+}
+
+function renderTable() {
+    rows.forEach(row => row.style.display = "none");
+
+    const start = (currentPage - 1) * rowsPerPage;
+    const end = start + rowsPerPage;
+    const pageRows = filteredRows.slice(start, end);
+
+    pageRows.forEach(row => row.style.display = "");
+
+    const totalPages = Math.max(1, Math.ceil(filteredRows.length / rowsPerPage));
+
+    visibleCount.innerText = filteredRows.length;
+    pageInfo.innerText = `Page ${currentPage} of ${totalPages}`;
+}
+
+function nextPage() {
+    const totalPages = Math.ceil(filteredRows.length / rowsPerPage);
+
+    if (currentPage < totalPages) {
+        currentPage++;
+        renderTable();
+    }
+}
+
+function prevPage() {
+    if (currentPage > 1) {
+        currentPage--;
+        renderTable();
+    }
+}
+
+function changeRowsPerPage() {
+    rowsPerPage = parseInt(document.getElementById("rowsPerPage").value);
+    currentPage = 1;
+    renderTable();
+}
+
+function sortTable(columnIndex, type) {
+    const body = document.getElementById("candidateBody");
+    const direction = sortDirection[columnIndex] === "asc" ? "desc" : "asc";
+    sortDirection[columnIndex] = direction;
+
+    filteredRows.sort((a, b) => {
+        let aValue = a.children[columnIndex].dataset.value || a.children[columnIndex].innerText;
+        let bValue = b.children[columnIndex].dataset.value || b.children[columnIndex].innerText;
+
+        if (type === "number") {
+            aValue = parseFloat(String(aValue).replace("#", "").replace("%", "")) || 0;
+            bValue = parseFloat(String(bValue).replace("#", "").replace("%", "")) || 0;
+        } else {
+            aValue = String(aValue).toLowerCase();
+            bValue = String(bValue).toLowerCase();
+        }
+
+        if (aValue < bValue) return direction === "asc" ? -1 : 1;
+        if (aValue > bValue) return direction === "asc" ? 1 : -1;
+
+        return 0;
+    });
+
+    filteredRows.forEach(row => body.appendChild(row));
+
+    currentPage = 1;
+    renderTable();
+}
+
+function resetFilters() {
+    searchInput.value = "";
+    matchFilter.value = "all";
+    emailFilter.value = "all";
+    minExp.value = "";
+    minScore.value = "";
+
+    applyFilters();
+}
+
+searchInput.addEventListener("input", applyFilters);
+matchFilter.addEventListener("change", applyFilters);
+emailFilter.addEventListener("change", applyFilters);
+minExp.addEventListener("input", applyFilters);
+minScore.addEventListener("input", applyFilters);
+
+filteredRows = [...rows];
+renderTable();
+</script>
+
+</body>
+</html>
