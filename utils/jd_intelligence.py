@@ -1,78 +1,208 @@
 import re
+from collections import Counter
 
 
 SKILL_SEPARATORS = r"[,;/\n|]+"
 
 
+STOPWORDS = {
+    "and", "or", "the", "a", "an", "to", "of", "for", "with", "in", "on",
+    "by", "as", "such", "role", "candidate", "ability"
+}
+
+
+# --------------------------------------------------
+# CLEANING
+# --------------------------------------------------
+
 def clean_skill(skill):
-    return skill.strip().lower().replace(".", "").replace("(", "").replace(")", "")
+    skill = skill.strip().lower()
+    skill = re.sub(r"[().]", "", skill)
+    skill = re.sub(r"\s+", " ", skill)
+    return skill
 
 
 def split_skills(text):
     if not text:
         return []
 
-    raw = re.split(SKILL_SEPARATORS, text)
+    parts = re.split(SKILL_SEPARATORS, text)
     skills = []
 
-    for item in raw:
-        skill = clean_skill(item)
-        if 2 <= len(skill) <= 40:
+    for part in parts:
+        skill = clean_skill(part)
+
+        skill = re.sub(
+            r"^(such as|including|like|using|experience with|knowledge of|familiar with)\s+",
+            "",
+            skill
+        )
+
+        if 2 <= len(skill) <= 40 and skill not in STOPWORDS:
             skills.append(skill)
 
-    return sorted(set(skills))
+    return list(set(skills))
 
 
-def extract_years_required(text, manual_years=0):
-    text = text.lower()
+# --------------------------------------------------
+# SMART SKILL EXTRACTION
+# --------------------------------------------------
+
+def extract_strong_skill_patterns(text):
     patterns = [
-        r"(\d+)\+?\s*(?:years|yrs)\s+(?:of\s+)?experience",
-        r"minimum\s+(\d+)\+?\s*(?:years|yrs)",
-        r"at least\s+(\d+)\+?\s*(?:years|yrs)",
+        r"(?:must have|required|requirements|skills)[:\-]\s*(.+)",
+        r"(?:experience with|proficient in|strong in|hands-on experience in)\s+(.+)",
+        r"(?:tools|technologies|frameworks)\s+(?:such as|like)\s+(.+)"
     ]
 
-    found = []
+    skills = set()
 
     for pattern in patterns:
-        for match in re.findall(pattern, text):
-            found.append(int(match))
+        matches = re.findall(pattern, text, re.IGNORECASE)
 
-    return max(found) if found else int(manual_years or 0)
+        for match in matches:
+            match = re.split(r"\.|\n", match)[0]
+            skills.update(split_skills(match))
 
+    return skills
+
+
+def extract_capitalized_tools(text):
+    candidates = re.findall(
+        r"\b(?:[A-Z][a-zA-Z0-9+#.-]*(?:\s+[A-Z][a-zA-Z0-9+#.-]*){0,2})\b",
+        text or ""
+    )
+
+    tools = set()
+
+    for item in candidates:
+        cleaned = clean_skill(item)
+
+        if 2 <= len(cleaned) <= 40:
+            # must look like real tool (not random word)
+            if any(c.isupper() for c in item[1:]) or len(item.split()) >= 2:
+                tools.add(cleaned)
+
+    return tools
+
+
+def extract_contextual_skills(text):
+    """
+    Extracts frequent meaningful terms (filters noise)
+    """
+    words = re.findall(r"\b[a-zA-Z][a-zA-Z0-9+#.-]{2,}\b", text.lower())
+
+    words = [w for w in words if w not in STOPWORDS]
+
+    counter = Counter(words)
+
+    # Keep only meaningful frequency words
+    return {
+        word for word, freq in counter.items()
+        if freq >= 2 and len(word) > 3
+    }
+
+
+# --------------------------------------------------
+# EXPERIENCE
+# --------------------------------------------------
+
+def extract_years_required(text, manual_years=0):
+    text = (text or "").lower()
+
+    patterns = [
+        r"(\d+)\+?\s*(?:years|yrs)\s+(?:of\s+)?experience",
+        r"minimum\s+(\d+)",
+        r"at least\s+(\d+)",
+        r"(\d+)\+?\s*years"
+    ]
+
+    years = []
+
+    for pattern in patterns:
+        years.extend([int(x) for x in re.findall(pattern, text)])
+
+    return max(years) if years else int(manual_years or 0)
+
+
+# --------------------------------------------------
+# RESPONSIBILITIES
+# --------------------------------------------------
 
 def extract_responsibilities(text):
     lines = [line.strip("•-* ").strip() for line in text.splitlines() if line.strip()]
+
+    action_words = [
+        "develop", "design", "build", "create", "implement",
+        "manage", "analyze", "test", "deploy", "maintain"
+    ]
+
     responsibilities = []
 
-    keywords = [
-        "develop", "design", "build", "maintain", "implement",
-        "manage", "analyze", "collaborate", "test", "deploy",
-        "integrate", "optimize", "support"
-    ]
-
     for line in lines:
-        lower = line.lower()
-        if any(word in lower for word in keywords) and len(line.split()) >= 4:
+        if any(word in line.lower() for word in action_words):
             responsibilities.append(line)
 
-    return responsibilities[:12]
+    return responsibilities[:15]
 
 
-def extract_skills_from_jd_text(text):
-    skill_patterns = [
-        r"(?:skills required|required skills|technical skills|must have)[:\-]\s*(.+)",
-        r"(?:experience with|knowledge of|proficient in|familiar with|hands on experience in)\s+(.+)",
-    ]
+# --------------------------------------------------
+# REQUIRED VS PREFERRED (IMPROVED)
+# --------------------------------------------------
 
-    skills = []
+def separate_required_preferred(skills, text):
+    text_lower = text.lower()
 
-    for pattern in skill_patterns:
-        matches = re.findall(pattern, text, re.IGNORECASE)
-        for match in matches:
-            skills.extend(split_skills(match))
+    required = set()
+    preferred = set()
 
-    return sorted(set(skills))
+    for skill in skills:
+        window = 100
 
+        pattern_required = rf"(must|required)[^.]{0,{window}}{re.escape(skill)}"
+        pattern_preferred = rf"(preferred|nice to have|plus)[^.]{0,{window}}{re.escape(skill)}"
+
+        if re.search(pattern_preferred, text_lower):
+            preferred.add(skill)
+        elif re.search(pattern_required, text_lower):
+            required.add(skill)
+        else:
+            # fallback: treat as required but softer
+            required.add(skill)
+
+    return required, preferred
+
+
+# --------------------------------------------------
+# DOMAIN DETECTION (IMPROVED)
+# --------------------------------------------------
+
+def detect_domain(text, skills):
+    combined = (text + " " + " ".join(skills)).lower()
+
+    domain_map = {
+        "AI / Machine Learning": ["machine learning", "deep learning", "nlp", "tensorflow"],
+        "Software Engineering": ["api", "backend", "frontend", "database"],
+        "Data / Analytics": ["data", "analytics", "sql", "dashboard"],
+        "Cloud / DevOps": ["aws", "docker", "kubernetes"],
+        "Cybersecurity": ["security", "vulnerability", "threat"],
+        "Design / UI UX": ["figma", "ui", "ux"],
+        "Marketing / Content": ["seo", "marketing", "content"],
+    }
+
+    scores = {}
+
+    for domain, keywords in domain_map.items():
+        scores[domain] = sum(k in combined for k in keywords)
+
+    best = max(scores, key=scores.get)
+
+    return best if scores[best] > 0 else "General"
+
+
+# --------------------------------------------------
+# MAIN FUNCTION
+# --------------------------------------------------
 
 def extract_dynamic_jd_requirements(
     job_description,
@@ -81,29 +211,47 @@ def extract_dynamic_jd_requirements(
     manual_years=0,
     manual_qualification=""
 ):
-    jd_text = job_description or ""
+    jd = job_description or ""
 
-    required_skills = set(split_skills(manual_required))
-    preferred_skills = set(split_skills(manual_preferred))
+    skills = set()
 
-    dynamic_skills = extract_skills_from_jd_text(jd_text)
-    required_skills.update(dynamic_skills)
+    # STRONG extraction first
+    skills.update(extract_strong_skill_patterns(jd))
 
-    responsibilities = extract_responsibilities(jd_text)
-    required_years = extract_years_required(jd_text, manual_years)
+    # tools (React, AWS, etc)
+    skills.update(extract_capitalized_tools(jd))
+
+    # contextual (only meaningful frequent words)
+    skills.update(extract_contextual_skills(jd))
+
+    # manual override
+    skills.update(split_skills(manual_required))
+
+    # FILTER FINAL SKILLS (IMPORTANT)
+    skills = {
+        s for s in skills
+        if 2 <= len(s) <= 30 and not s.isdigit()
+    }
+
+    required, preferred = separate_required_preferred(skills, jd)
+
+    responsibilities = extract_responsibilities(jd)
+    years = extract_years_required(jd, manual_years)
+    domain = detect_domain(jd, skills)
 
     return {
-    "clean_jd": jd_text,
-    "job_description": jd_text,
+        "clean_jd": jd,
+        "job_description": jd,
 
-    "required_skills": sorted(required_skills),
-    "preferred_skills": sorted(preferred_skills),
+        "domain": domain,
 
-    "responsibilities": responsibilities,
+        "required_skills": sorted(required),
+        "preferred_skills": sorted(preferred),
 
-    "required_years": required_years,
-    "manual_years": required_years,
+        "responsibilities": responsibilities,
 
-    "qualification": manual_qualification,
-    "required_qualification": manual_qualification,
-}
+        "required_years": years,
+        "manual_years": years,
+
+        "qualification": manual_qualification or "",
+    }

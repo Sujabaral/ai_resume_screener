@@ -1,23 +1,32 @@
-from email.mime import message
 import os
-from dotenv import load_dotenv
-from sqlalchemy import or_
+import hashlib
 from datetime import datetime
+
+from dotenv import load_dotenv
 from flask import Flask, render_template, request, redirect, url_for, flash, send_file
+from flask import send_from_directory
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from werkzeug.utils import secure_filename
-from flask import render_template
-from flask_login import login_required
-from models import Job, Candidate, EmailLog
+
 from models import db, User, Job, Candidate, EmailLog
-import hashlib
+
 from utils.file_parser import allowed_file, extract_text_from_file
 from utils.candidate_parser import extract_candidate_info
 from utils.jd_intelligence import extract_dynamic_jd_requirements
-from utils.smart_ranker import rank_candidate
+from utils.smart_ranker import rank_candidate as smart_rank_candidate
 from utils.excel_exporter import export_to_excel
 from utils.email_sender import send_email, acceptance_template, rejection_template
-from flask import send_from_directory
+
+
+# Optional v4 ML scorer
+try:
+    from utils.v4_ml_scorer import rank_candidate_v4
+    V4_ML_AVAILABLE = True
+except Exception as e:
+    print("V4 ML scorer not available. Falling back to smart_ranker.py")
+    print("Reason:", e)
+    V4_ML_AVAILABLE = False
+
 
 basedir = os.path.abspath(os.path.dirname(__file__))
 
@@ -32,28 +41,14 @@ app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv(
 )
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
-app.config["UPLOAD_FOLDER"] = "uploads"
-app.config["EXPORT_FOLDER"] = "exports"
-app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100MB max upload request
+app.config["UPLOAD_FOLDER"] = os.path.join(basedir, "uploads")
+app.config["EXPORT_FOLDER"] = os.path.join(basedir, "exports")
+app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
 
 os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 os.makedirs(app.config["EXPORT_FOLDER"], exist_ok=True)
 
 db.init_app(app)
-
-with app.app_context():
-    db.create_all()
-
-    admin = User.query.filter_by(email="admin@midas.local").first()
-    if not admin:
-        admin = User(
-            name="MIDAS Admin",
-            email="admin@midas.local",
-            role="admin"
-        )
-        admin.set_password("admin123")
-        db.session.add(admin)
-        db.session.commit()
 
 login_manager = LoginManager()
 login_manager.login_view = "login"
@@ -64,10 +59,26 @@ login_manager.init_app(app)
 def load_user(user_id):
     return db.session.get(User, int(user_id))
 
-@app.route("/init-db")
-def init_db():
-    db.create_all()
 
+# --------------------------------------------------
+# Helpers
+# --------------------------------------------------
+
+def generate_resume_hash(text):
+    cleaned = " ".join((text or "").lower().split())
+    return hashlib.sha256(cleaned.encode("utf-8")).hexdigest()
+
+
+def safe_int(value, default=0):
+    try:
+        if value in [None, ""]:
+            return default
+        return int(value)
+    except Exception:
+        return default
+
+
+def create_default_admin():
     admin = User.query.filter_by(email="admin@midas.local").first()
 
     if not admin:
@@ -80,8 +91,93 @@ def init_db():
         db.session.add(admin)
         db.session.commit()
 
+
+def build_structured_cv_data(cv_text, candidate_info):
+    """
+    v4 upgrade:
+    Instead of sending only raw CV text to the ranker,
+    we send structured resume sections too.
+    """
+    return {
+        "full_text": cv_text or "",
+        "summary_text": candidate_info.get("summary_text", ""),
+        "skills_text": candidate_info.get("skills_text", ""),
+        "experience_text": candidate_info.get("experience_text", ""),
+        "education_text": candidate_info.get("education_text", ""),
+        "projects_text": candidate_info.get("projects_text", ""),
+        "certifications_text": candidate_info.get("certifications_text", ""),
+        "general_text": candidate_info.get("general_text", ""),
+    }
+
+
+def run_ranking_engine(cv_data, jd_data):
+    """
+    v4 scoring entry point.
+
+    If utils/v4_ml_scorer.py exists, use it.
+    Otherwise, safely fall back to smart_ranker.py.
+    """
+    if V4_ML_AVAILABLE:
+        return rank_candidate_v4(cv_data, jd_data)
+
+    # Fallback compatibility:
+    # If your current smart_ranker accepts dict input, pass cv_data directly.
+    # If it still accepts raw text only, pass full_text.
+    try:
+        return smart_rank_candidate(cv_data, jd_data)
+    except Exception:
+        return smart_rank_candidate(cv_data.get("full_text", ""), jd_data)
+
+
+def normalize_jd_data(jd_data, job_title, job_description, manual_qualification, manual_years):
+    jd_data = jd_data or {}
+
+    jd_data["job_title"] = job_title or jd_data.get("role_title", "") or "Untitled Job"
+    jd_data["job_description"] = job_description or jd_data.get("job_description", "")
+    jd_data["description"] = job_description or jd_data.get("description", "")
+    jd_data["clean_jd"] = jd_data.get("clean_jd", job_description)
+
+    jd_data["qualification"] = (
+        manual_qualification
+        or jd_data.get("qualification", "")
+        or jd_data.get("required_qualification", "")
+    )
+
+    jd_data["required_qualification"] = jd_data["qualification"]
+
+    jd_data["required_years"] = jd_data.get("required_years", manual_years) or manual_years
+    jd_data["manual_years"] = jd_data["required_years"]
+
+    jd_data["required_skills"] = jd_data.get("required_skills", []) or []
+    jd_data["preferred_skills"] = jd_data.get("preferred_skills", []) or []
+
+    jd_data["domain"] = jd_data.get("domain", "General")
+
+    if not jd_data.get("responsibilities"):
+        jd_data["responsibilities"] = [job_description] if job_description else []
+
+    return jd_data
+
+
+# --------------------------------------------------
+# DB init
+# --------------------------------------------------
+
+with app.app_context():
+    db.create_all()
+    create_default_admin()
+
+
+@app.route("/init-db")
+def init_db():
+    db.create_all()
+    create_default_admin()
     return "Database initialized. Login: admin@midas.local / admin123"
 
+
+# --------------------------------------------------
+# Auth
+# --------------------------------------------------
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
@@ -95,7 +191,7 @@ def login():
             login_user(user)
             return redirect(url_for("index"))
 
-        flash("Invalid email or password.")
+        flash("Invalid email or password.", "danger")
 
     return render_template("login.html")
 
@@ -106,17 +202,27 @@ def logout():
     logout_user()
     return redirect(url_for("login"))
 
+
+# --------------------------------------------------
+# File preview
+# --------------------------------------------------
+
 @app.route("/uploads/<path:filename>")
 @login_required
 def preview_resume(filename):
     return send_from_directory(app.config["UPLOAD_FOLDER"], filename)
+
+
+# --------------------------------------------------
+# Main upload + v4 ranking
+# --------------------------------------------------
 
 @app.route("/", methods=["GET", "POST"])
 @login_required
 def index():
     if request.method == "POST":
         job_title = request.form.get("job_title", "").strip()
-        manual_years = int(request.form.get("required_years", 0))
+        manual_years = safe_int(request.form.get("required_years"), 0)
         manual_qualification = request.form.get("qualification", "").strip()
         manual_required = request.form.get("required_skills", "")
         manual_preferred = request.form.get("preferred_skills", "")
@@ -124,8 +230,15 @@ def index():
 
         files = request.files.getlist("resumes")
 
+        print("========== UPLOAD DEBUG ==========")
+        print("FILES RECEIVED:", [f.filename for f in files])
+        print("JOB TITLE:", job_title)
+        print("JD LENGTH:", len(job_description))
+        print("V4 ML AVAILABLE:", V4_ML_AVAILABLE)
+        print("==================================")
+
         if not files or files[0].filename == "":
-            flash("Please upload at least one resume.")
+            flash("Please upload at least one resume.", "warning")
             return redirect(url_for("index"))
 
         jd_data = extract_dynamic_jd_requirements(
@@ -136,10 +249,22 @@ def index():
             manual_qualification=manual_qualification,
         )
 
+        jd_data = normalize_jd_data(
+            jd_data=jd_data,
+            job_title=job_title,
+            job_description=job_description,
+            manual_qualification=manual_qualification,
+            manual_years=manual_years,
+        )
+
+        print("========== JD DATA DEBUG ==========")
+        print(jd_data)
+        print("===================================")
+
         job = Job(
-            title=job_title,
+            title=job_title or "Untitled Job",
             required_years=jd_data["required_years"],
-            qualification=manual_qualification,
+            qualification=jd_data["qualification"],
             required_skills=", ".join(jd_data["required_skills"]),
             preferred_skills=", ".join(jd_data["preferred_skills"]),
             job_description=job_description,
@@ -151,31 +276,113 @@ def index():
 
         processed_count = 0
         skipped_count = 0
+        skipped_reasons = []
+
+        seen_hashes = set()
 
         for file in files:
             if not file or file.filename == "":
                 skipped_count += 1
+                skipped_reasons.append("Empty file input skipped.")
                 continue
 
             if not allowed_file(file.filename):
                 skipped_count += 1
+                skipped_reasons.append(f"{file.filename}: unsupported file type.")
                 continue
 
-            filename = secure_filename(file.filename)
+            original_filename = secure_filename(file.filename)
             timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
-            saved_filename = f"{timestamp}_{filename}"
+            saved_filename = f"{timestamp}_{original_filename}"
             file_path = os.path.join(app.config["UPLOAD_FOLDER"], saved_filename)
 
-            file.save(file_path)
-
-            cv_text = extract_text_from_file(file_path)
-
-            if not cv_text:
+            try:
+                file.save(file_path)
+            except Exception as e:
                 skipped_count += 1
+                skipped_reasons.append(f"{file.filename}: save failed - {e}")
                 continue
 
-            candidate_info = extract_candidate_info(cv_text)
-            rank = rank_candidate(cv_text, jd_data)
+            try:
+                cv_text = extract_text_from_file(file_path)
+            except Exception as e:
+                skipped_count += 1
+                skipped_reasons.append(f"{file.filename}: parsing crashed - {e}")
+                continue
+
+            print("========== CV PARSE DEBUG ==========")
+            print("FILE:", file.filename)
+            print("CV TEXT LENGTH:", len(cv_text or ""))
+            print("CV PREVIEW:", (cv_text or "")[:300])
+            print("====================================")
+
+            if not cv_text or len(cv_text.strip()) < 30:
+                skipped_count += 1
+                skipped_reasons.append(f"{file.filename}: no readable text extracted.")
+                continue
+
+            resume_hash = generate_resume_hash(cv_text)
+
+            if resume_hash in seen_hashes:
+                skipped_count += 1
+                skipped_reasons.append(f"{file.filename}: duplicate resume in current upload batch.")
+                continue
+
+            existing_duplicate = Candidate.query.filter_by(
+                job_id=job.id,
+                resume_hash=resume_hash
+            ).first()
+
+            if existing_duplicate:
+                skipped_count += 1
+                skipped_reasons.append(f"{file.filename}: duplicate resume already exists for this job.")
+                continue
+
+            seen_hashes.add(resume_hash)
+
+            try:
+                candidate_info = extract_candidate_info(cv_text)
+            except Exception as e:
+                candidate_info = {
+                    "name": "Not found",
+                    "email": "Not found",
+                    "phone": "Not found",
+                    "summary_text": "",
+                    "skills_text": "",
+                    "experience_text": "",
+                    "education_text": "",
+                    "projects_text": "",
+                    "certifications_text": "",
+                    "general_text": "",
+                }
+                print("Candidate parser failed:", e)
+
+            cv_data = build_structured_cv_data(cv_text, candidate_info)
+
+            try:
+                print("========== BEFORE V4 RANKING ==========")
+                print("FILE:", file.filename)
+                print("CV TEXT LENGTH:", len(cv_text or ""))
+                print("STRUCTURED SKILLS LENGTH:", len(cv_data.get("skills_text", "")))
+                print("STRUCTURED EXPERIENCE LENGTH:", len(cv_data.get("experience_text", "")))
+                print("REQUIRED SKILLS:", jd_data.get("required_skills", []))
+                print("PREFERRED SKILLS:", jd_data.get("preferred_skills", []))
+                print("JD DESCRIPTION LENGTH:", len(jd_data.get("job_description", "")))
+                print("=======================================")
+
+                rank = run_ranking_engine(cv_data, jd_data)
+
+                print("========== AFTER V4 RANKING ==========")
+                print("SCORE:", rank.get("overall_score"))
+                print("LABEL:", rank.get("label"))
+                print("ENGINE:", "v4_ml_scorer" if V4_ML_AVAILABLE else "smart_ranker_fallback")
+                print("======================================")
+
+            except Exception as e:
+                skipped_count += 1
+                skipped_reasons.append(f"{file.filename}: ranking failed - {e}")
+                print("RANKING ERROR:", e)
+                continue
 
             skill_data = rank.get("skill_data", {})
 
@@ -188,6 +395,7 @@ def index():
                 phone=candidate_info.get("phone", "Not found"),
 
                 resume_text=cv_text,
+                resume_hash=resume_hash,
 
                 overall_score=rank.get("overall_score", 0),
                 review_label=rank.get("label", "Manual Review"),
@@ -224,12 +432,22 @@ def index():
 
         db.session.commit()
 
-        flash(f"Processed {processed_count} resumes. Skipped {skipped_count} files.")
+        flash(
+            f"Processed {processed_count} resumes. Skipped {skipped_count} files.",
+            "info"
+        )
+
+        for reason in skipped_reasons[:8]:
+            flash(reason, "warning")
 
         return redirect(url_for("ranking", job_id=job.id))
 
     return render_template("index.html")
 
+
+# --------------------------------------------------
+# Jobs
+# --------------------------------------------------
 
 @app.route("/jobs")
 @login_required
@@ -237,9 +455,10 @@ def jobs():
     all_jobs = Job.query.order_by(Job.created_at.desc()).all()
     return render_template("jobs.html", jobs=all_jobs)
 
-def generate_resume_hash(text):
-    cleaned = " ".join(text.lower().split())
-    return hashlib.sha256(cleaned.encode("utf-8")).hexdigest()
+
+# --------------------------------------------------
+# Ranking
+# --------------------------------------------------
 
 @app.route("/ranking/<int:job_id>")
 @login_required
@@ -257,7 +476,7 @@ def ranking(job_id):
 
         if c.ai_analysis:
             c.ai_analysis = c.ai_analysis.replace(
-                "#N/A",
+                "Ranking will be assigned after all resumes are processed.",
                 f"#{index} out of {total_candidates}"
             )
 
@@ -269,6 +488,11 @@ def ranking(job_id):
         candidates=candidates,
         bias_warning=True
     )
+
+
+# --------------------------------------------------
+# Excel export
+# --------------------------------------------------
 
 @app.route("/job/<int:job_id>/download-excel")
 @login_required
@@ -315,6 +539,12 @@ def download_excel(job_id):
 
     excel_path = export_to_excel(rows, app.config["EXPORT_FOLDER"])
     return send_file(excel_path, as_attachment=True)
+
+
+# --------------------------------------------------
+# Email sending
+# --------------------------------------------------
+
 @app.route("/send-email/<int:candidate_id>", methods=["POST"])
 @login_required
 def send_candidate_email(candidate_id):
@@ -361,32 +591,23 @@ def send_candidate_email(candidate_id):
     db.session.add(log)
 
     if success:
-        normalized_email = candidate.email.strip().lower()
+        candidate.email_sent = True
+        candidate.email_locked = True
+        candidate.email_sent_at = datetime.utcnow()
+        candidate.email_sent_by = current_user.id
+        candidate.hr_decision = decision
 
-        duplicate_candidates = Candidate.query.filter(
-            db.func.lower(db.func.trim(Candidate.email)) == normalized_email,
-            Candidate.job_id == job.id
-        ).all()
-
-        for dup in duplicate_candidates:
-            dup.email_sent = True
-            dup.email_locked = True
-            dup.email_sent_at = datetime.utcnow()
-            dup.email_sent_by = current_user.id
-            dup.hr_decision = decision
-
-        flash(
-            f"{decision} email sent successfully to {candidate.email}. "
-            f"{len(duplicate_candidates)} duplicate record(s) marked as sent.",
-            "success"
-        )
-
+        flash(f"{decision} email sent successfully to {candidate.email}.", "success")
     else:
         flash(f"Email failed: {message}", "danger")
 
     db.session.commit()
     return redirect(url_for("ranking", job_id=job.id))
 
+
+# --------------------------------------------------
+# Candidate detail
+# --------------------------------------------------
 
 @app.route("/candidate/<int:candidate_id>")
 @login_required
@@ -435,41 +656,13 @@ def candidate_detail(candidate_id):
         candidate.confidence = "Low"
 
     score_breakdown = [
-        {
-            "label": "Overall Match",
-            "value": round(candidate.overall_score or 0, 2),
-            "level": level(candidate.overall_score),
-        },
-        {
-            "label": "Semantic Match",
-            "value": round(candidate.semantic_score or 0, 2),
-            "level": level(candidate.semantic_score),
-        },
-        {
-            "label": "Responsibility Fit",
-            "value": round(candidate.responsibility_score or 0, 2),
-            "level": level(candidate.responsibility_score),
-        },
-        {
-            "label": "Experience Match",
-            "value": round(candidate.experience_score or 0, 2),
-            "level": level(candidate.experience_score),
-        },
-        {
-            "label": "Education Match",
-            "value": round(candidate.education_score or 0, 2),
-            "level": level(candidate.education_score),
-        },
-        {
-            "label": "Project Relevance",
-            "value": round(candidate.project_score or 0, 2),
-            "level": level(candidate.project_score),
-        },
-        {
-            "label": "Structure Score",
-            "value": round(candidate.structure_score or 0, 2),
-            "level": level(candidate.structure_score),
-        },
+        {"label": "Overall Match", "value": round(candidate.overall_score or 0, 2), "level": level(candidate.overall_score)},
+        {"label": "Semantic Match", "value": round(candidate.semantic_score or 0, 2), "level": level(candidate.semantic_score)},
+        {"label": "Responsibility Fit", "value": round(candidate.responsibility_score or 0, 2), "level": level(candidate.responsibility_score)},
+        {"label": "Experience Match", "value": round(candidate.experience_score or 0, 2), "level": level(candidate.experience_score)},
+        {"label": "Education Match", "value": round(candidate.education_score or 0, 2), "level": level(candidate.education_score)},
+        {"label": "Project Relevance", "value": round(candidate.project_score or 0, 2), "level": level(candidate.project_score)},
+        {"label": "Structure Score", "value": round(candidate.structure_score or 0, 2), "level": level(candidate.structure_score)},
     ]
 
     required_skills = []
@@ -488,13 +681,23 @@ def candidate_detail(candidate_id):
         score_breakdown=score_breakdown,
         required_skills=required_skills,
         preferred_skills=preferred_skills,
-    )    
+    )
+
+
+# --------------------------------------------------
+# Email audit
+# --------------------------------------------------
 
 @app.route("/audit/email-logs")
 @login_required
 def email_logs():
     logs = EmailLog.query.order_by(EmailLog.sent_at.desc()).all()
     return render_template("email_logs.html", logs=logs)
+
+
+# --------------------------------------------------
+# Admin dashboard
+# --------------------------------------------------
 
 @app.route("/admin")
 @login_required
@@ -531,6 +734,7 @@ def admin_dashboard():
         recent_jobs=recent_jobs,
         recent_candidates=recent_candidates,
     )
-    
+
+
 if __name__ == "__main__":
     app.run(debug=True, port=5050)
