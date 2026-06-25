@@ -1,4 +1,4 @@
-# 🤖 AI Resume Screener
+# AI Resume Screener
 
 AI Resume Screener is an advanced AI-powered recruitment and resume analysis system designed for real-world HR usage. The project intelligently analyzes resumes against job descriptions using semantic AI matching, NLP techniques, skill extraction, experience evaluation, and explainable scoring.
 
@@ -6,23 +6,23 @@ The system helps recruiters efficiently rank, analyze, and manage large volumes 
 
 ---
 
-# ✨ Features
+#  Features
 
-## 📄 Resume Parsing
+## Resume Parsing
 - PDF resume parsing
 - DOCX resume parsing
 - Candidate information extraction
 - Email and phone detection
 - Duplicate resume detection
 
-## 🧠 AI-Powered Matching
+## AI-Powered Matching
 - Semantic similarity matching using Sentence Transformers
 - Job description understanding
 - Dynamic skill extraction
 - Responsibility matching
 - Domain-aware analysis
 
-## 📊 Smart Candidate Scoring
+## Smart Candidate Scoring
 - Skill match scoring
 - Semantic relevance scoring
 - Experience scoring
@@ -30,18 +30,18 @@ The system helps recruiters efficiently rank, analyze, and manage large volumes 
 - Project relevance scoring
 - Resume structure scoring
 
-## 🏆 Candidate Ranking
+## Candidate Ranking
 - Automatic ranking system
 - Batch ranking for multiple resumes
 - Explainable score breakdown
 - Match percentage visualization
 
-## 📁 Bulk Resume Upload
+## Bulk Resume Upload
 - Upload 50+ resumes at once
 - Multi-file processing
 - Fast screening pipeline
 
-## 📈 HR Dashboard
+## HR Dashboard
 - Recruiter/Admin login system
 - Candidate management
 - Job posting support
